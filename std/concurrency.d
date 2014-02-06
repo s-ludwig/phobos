@@ -81,7 +81,7 @@ private
             enum hasLocalAliasing = false;
         else
             enum hasLocalAliasing = (std.traits.hasLocalAliasing!(T[0]) && !is(T[0] == Tid)) ||
-                                    std.concurrency.hasLocalAliasing!(T[1 .. $]);
+                                     std.concurrency.hasLocalAliasing!(T[1 .. $]);
     }
 
     enum MsgType
@@ -185,23 +185,28 @@ private
         }
     }
 
-    MessageBox  mbox;
-    bool[Tid]   links;
-    Tid         owner;
+    @property ref ThreadInfo thisInfo()
+    {
+        if( scheduler is null )
+            return ThreadInfo.thisInfo;
+        return scheduler.thisInfo;
+    }
 }
 
 
 static ~this()
 {
-    if( mbox !is null )
-    {
-        mbox.close();
-        auto me = thisTid;
-        foreach( tid; links.keys )
-            _send( MsgType.linkDead, tid, me );
-        if( owner != Tid.init )
-            _send( MsgType.linkDead, owner, me );
-    }
+    alias info  = thisInfo;
+    auto  ident = info.ident;
+    auto  links = info.links;
+    auto  owner = info.owner;
+
+    if( ident.mbox !is null )
+        ident.mbox.close();
+    foreach( tid; links.keys )
+        _send( MsgType.linkDead, tid, ident );
+    if( owner != Tid.init )
+        _send( MsgType.linkDead, owner, ident );
 }
 
 
@@ -309,7 +314,7 @@ class TidMissingException : Exception
 
 
 /**
- * An opaque type used to represent a logical local process.
+ * An opaque type used to represent a logical thread.
  */
 struct Tid
 {
@@ -329,10 +334,10 @@ private:
  */
 @property Tid thisTid()
 {
-    if( mbox )
-        return Tid( mbox );
-    mbox = new MessageBox;
-    return Tid( mbox );
+    if( thisInfo.ident != Tid.init )
+        return thisInfo.ident;
+    thisInfo.ident = Tid( new MessageBox );
+    return thisInfo.ident;
 }
 
 /**
@@ -344,8 +349,9 @@ private:
  */
 @property Tid ownerTid()
 {
-    enforceEx!TidMissingException(owner.mbox !is null, "Error: Thread has no owner thread.");
-    return owner;
+    enforceEx!TidMissingException(thisInfo.owner.mbox !is null,
+                                  "Error: Thread has no owner thread.");
+    return thisInfo.owner;
 }
 
 unittest
@@ -482,14 +488,20 @@ private Tid _spawn(F, T...)( bool linked, F fn, T args )
 
     void exec()
     {
-        mbox  = spawnTid.mbox;
-        owner = ownerTid;
+        thisInfo.ident = spawnTid;
+        thisInfo.owner = ownerTid;
         fn( args );
     }
 
     // TODO: MessageList and &exec should be shared.
-    auto t = new Thread( &exec ); t.start();
-    links[spawnTid] = linked;
+    if( scheduler !is null )
+        scheduler.spawn( &exec );
+    else
+    {
+        auto t = new Thread( &exec );
+        t.start();
+    }
+    thisInfo.links[spawnTid] = linked;
     return spawnTid;
 }
 
@@ -626,13 +638,15 @@ private void _send(T...)( MsgType type, Tid tid, T vals )
 void receive(T...)( T ops )
 in
 {
-    assert(mbox !is null, "Cannot receive a message until a thread was spawned "~
+    assert(thisInfo.ident.mbox !is null,
+           "Cannot receive a message until a thread was spawned "
            "or thisTid was passed to a running thread.");
 }
 body
 {
     checkops( ops );
-    mbox.get( ops );
+
+    thisInfo.ident.mbox.get( ops );
 }
 
 
@@ -708,37 +722,39 @@ private template receiveOnlyRet(T...)
 receiveOnlyRet!(T) receiveOnly(T...)()
 in
 {
-    assert(mbox !is null, "Cannot receive a message until a thread was spawned "~
+    assert(thisInfo.ident.mbox !is null,
+           "Cannot receive a message until a thread was spawned "
            "or thisTid was passed to a running thread.");
 }
 body
 {
     Tuple!(T) ret;
 
-    mbox.get( ( T val )
-              {
-                  static if( T.length )
-                      ret.field = val;
-              },
-              ( LinkTerminated e )
-              {
-                  throw e;
-              },
-              ( OwnerTerminated e )
-              {
-                  throw e;
-              },
-              ( Variant val )
-              {
-                  static if (T.length > 1)
-                      string exp = T.stringof;
-                  else
-                      string exp = T[0].stringof;
+    thisInfo.ident.mbox.get(
+        ( T val )
+        {
+            static if( T.length )
+                ret.field = val;
+        },
+        ( LinkTerminated e )
+        {
+            throw e;
+        },
+        ( OwnerTerminated e )
+        {
+            throw e;
+        },
+        ( Variant val )
+        {
+            static if (T.length > 1)
+                string exp = T.stringof;
+            else
+                string exp = T[0].stringof;
 
-                  throw new MessageMismatch(
-                      format("Unexpected message type: expected '%s', got '%s'",
-                          exp, val.type.toString()));
-              } );
+            throw new MessageMismatch(
+                format("Unexpected message type: expected '%s', got '%s'",
+                       exp, val.type.toString()));
+        } );
     static if( T.length == 1 )
         return ret[0];
     else
@@ -775,36 +791,38 @@ unittest
 bool receiveTimeout(T...)( Duration duration, T ops )
 in
 {
-    assert(mbox !is null, "Cannot receive a message until a thread was spawned "~
+    assert(thisInfo.ident.mbox !is null,
+           "Cannot receive a message until a thread was spawned "
            "or thisTid was passed to a running thread.");
 }
 body
 {
     checkops( ops );
-    return mbox.get( duration, ops );
+
+    return thisInfo.ident.mbox.get( duration, ops );
 }
 
 unittest
 {
     assert( __traits( compiles,
                       {
-                          receiveTimeout( dur!"msecs"(0), (Variant x) {} );
-                          receiveTimeout( dur!"msecs"(0), (int x) {}, (Variant x) {} );
+                          receiveTimeout( msecs(0), (Variant x) {} );
+                          receiveTimeout( msecs(0), (int x) {}, (Variant x) {} );
                       } ) );
 
     assert( !__traits( compiles,
                        {
-                           receiveTimeout( dur!"msecs"(0), (Variant x) {}, (int x) {} );
+                           receiveTimeout( msecs(0), (Variant x) {}, (int x) {} );
                        } ) );
 
     assert( !__traits( compiles,
                        {
-                           receiveTimeout( dur!"msecs"(0), (int x) {}, (int x) {} );
+                           receiveTimeout( msecs(0), (int x) {}, (int x) {} );
                        } ) );
 
     assert( __traits( compiles,
                       {
-                          receiveTimeout( dur!"msecs"(10), (int x) {}, (Variant x) {} );
+                          receiveTimeout( msecs(10), (int x) {}, (Variant x) {} );
                       } ) );
 }
 
@@ -999,6 +1017,224 @@ Tid locate( string name )
 
 
 //////////////////////////////////////////////////////////////////////////////
+// Scheduler
+//////////////////////////////////////////////////////////////////////////////
+
+
+struct ThreadInfo
+{       
+    Tid       ident;
+    bool[Tid] links;
+    Tid       owner;
+
+    static @property ref thisInfo()
+    {
+        static ThreadInfo val;
+        return val;
+    }
+}
+
+
+interface Scheduler
+{
+    void start( void delegate() op );
+    void spawn( void delegate() op );
+    void yield();
+
+    @property ref ThreadInfo thisInfo();
+
+    Condition newCondition( Mutex m );
+}
+
+
+class ThreadScheduler :
+    Scheduler
+{
+    void start( void delegate() op )
+    {
+        op();
+    }
+
+
+    void spawn( void delegate() op )
+    {
+        auto t = new Thread( op );
+        t.start();
+    }
+
+
+    void yield()
+    {
+        // no explicit yield needed
+    }
+
+
+    @property ref ThreadInfo thisInfo()
+    {
+        return ThreadInfo.thisInfo;
+    }
+
+    Condition newCondition( Mutex m )
+    {
+        return new Condition( m );
+    }
+}
+
+
+class FiberScheduler :
+    Scheduler
+{
+    void start( void delegate() op )
+    {
+        m_fibers ~= new InfoFiber( op );
+        dispatch();
+    }
+
+
+    void spawn( void delegate() op )
+    {
+        void wrap()
+        {
+            scope(exit)
+            {
+                auto me = thisTid;
+
+                synchronized( registryLock )
+                {
+                    if( auto allNames = me in namesByTid )
+                    {
+                        foreach( name; *allNames )
+                            tidByName.remove( name );
+                        namesByTid.remove( me );
+                    }
+                }
+            }
+            op();
+        }
+        m_fibers ~= new InfoFiber( &wrap );
+        yield();
+    }
+
+
+    void yield()
+    {
+        if( Fiber.getThis() )
+            return Fiber.yield();
+        return dispatch();
+    }
+
+
+    @property ref ThreadInfo thisInfo()
+    {
+        auto f = cast(InfoFiber) Fiber.getThis();
+
+        if( f !is null )
+            return f.info;
+        return ThreadInfo.thisInfo;
+    }
+
+
+    Condition newCondition( Mutex m )
+    {
+        return new FiberCondition( m );
+    }
+
+
+private:
+    static class InfoFiber :
+        Fiber
+    {
+        ThreadInfo info;
+
+        this( void delegate() op )
+        {
+            super( op );
+        }
+    }
+
+
+    class FiberCondition :
+        Condition
+    {
+        this( Mutex m )
+        {
+            super(m);
+            notified = false;
+        }
+
+        override void wait()
+        {
+            switchContext();
+        }
+
+        override bool wait( Duration period )
+        {
+            scope(exit) notified = false;
+
+            for( auto limit = Clock.currTime( UTC() ) + period;
+                 !notified && !period.isNegative;
+                 period = limit - Clock.currTime( UTC() ) )
+            {
+                yield();
+            }
+            return notified;
+        }
+
+        override void notify()
+        {
+            notified = true;
+            switchContext();
+        }
+
+        override void notifyAll()
+        {
+            notified = true;
+            switchContext();
+        }
+
+    private:
+        final void switchContext()
+        {
+            mutex.unlock();
+            scope(exit) mutex.lock();
+            yield();
+        }
+
+        private bool notified;
+    }
+
+
+private:
+    final void dispatch()
+    {
+        import std.algorithm : remove;
+
+        while( m_fibers.length > 0 )
+        {
+            m_fibers[m_pos].call();
+            if( m_fibers[m_pos].state() == Fiber.State.TERM )
+            {
+                if( m_pos >= (m_fibers = remove( m_fibers, m_pos )).length )
+                    m_pos = 0;
+            }
+            else if( m_pos++ >= m_fibers.length - 1 )
+            {
+                m_pos = 0;
+            }
+        }
+    }
+
+
+private:
+    Fiber[] m_fibers;
+    size_t  m_pos;
+}
+
+
+__gshared Scheduler scheduler;
+
+
+//////////////////////////////////////////////////////////////////////////////
 // MessageBox Implementation
 //////////////////////////////////////////////////////////////////////////////
 
@@ -1017,9 +1253,18 @@ private
         this()
         {
             m_lock      = new Mutex;
-            m_putMsg    = new Condition( m_lock );
-            m_notFull   = new Condition( m_lock );
             m_closed    = false;
+
+            if( scheduler is null )
+            {
+                m_putMsg  = new Condition( m_lock );
+                m_notFull = new Condition( m_lock );
+            }
+            else
+            {
+                m_putMsg  = scheduler.newCondition( m_lock );
+                m_notFull = scheduler.newCondition( m_lock ); 
+            }
         }
 
 
@@ -1168,11 +1413,11 @@ private
                 assert( msg.convertsTo!(Tid) );
                 auto tid = msg.get!(Tid);
 
-                if( bool* depends = (tid in links) )
+                if( bool* depends = (tid in thisInfo.links) )
                 {
-                    links.remove( tid );
+                    thisInfo.links.remove( tid );
                     // Give the owner relationship precedence.
-                    if( *depends && tid != owner )
+                    if( *depends && tid != thisInfo.owner )
                     {
                         auto e = new LinkTerminated( tid );
                         auto m = Message( MsgType.standard, e );
@@ -1181,9 +1426,9 @@ private
                         throw e;
                     }
                 }
-                if( tid == owner )
+                if( tid == thisInfo.owner )
                 {
-                    owner = Tid.init;
+                    thisInfo.owner = Tid.init;
                     auto e = new OwnerTerminated( tid );
                     auto m = Message( MsgType.standard, e );
                     if( onStandardMsg( m ) )
@@ -1282,6 +1527,8 @@ private
                 {
                     return true;
                 }
+                if( scheduler !is null )
+                    scheduler.yield();
                 synchronized( m_lock )
                 {
                     updateMsgCount();
@@ -1341,9 +1588,9 @@ private
                 assert( msg.convertsTo!(Tid) );
                 auto tid = msg.get!(Tid);
 
-                links.remove( tid );
-                if( tid == owner )
-                    owner = Tid.init;
+                thisInfo.links.remove( tid );
+                if( tid == thisInfo.owner )
+                    thisInfo.owner = Tid.init;
             }
 
             void sweep( ref ListT list )
@@ -1658,7 +1905,7 @@ version( unittest )
     }
 
 
-    unittest
+    void simpleTest()
     {
         auto tid = spawn( &testfn, thisTid );
         runTest( tid );
@@ -1667,5 +1914,19 @@ version( unittest )
         tid = spawn( &testfn, thisTid );
         setMaxMailboxSize( tid, 2, OnCrowding.block );
         runTest( tid );
+    }
+
+
+    unittest
+    {
+        simpleTest();
+    }
+
+
+    unittest
+    {
+        scheduler = new ThreadScheduler;
+        simpleTest();
+        scheduler = null;
     }
 }
