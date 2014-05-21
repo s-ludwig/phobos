@@ -1390,7 +1390,7 @@ private
                 foreach( i, t; Ops )
                 {
                     alias Args = ParameterTypeTuple!(t);
-                    auto op = ops[i];
+                    auto  op   = ops[i];
 
                     if( msg.convertsTo!(Args) )
                     {
