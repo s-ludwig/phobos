@@ -1022,7 +1022,7 @@ Tid locate( string name )
 
 
 struct ThreadInfo
-{       
+{
     Tid       ident;
     bool[Tid] links;
     Tid       owner;
@@ -1263,7 +1263,7 @@ private
             else
             {
                 m_putMsg  = scheduler.newCondition( m_lock );
-                m_notFull = scheduler.newCondition( m_lock ); 
+                m_notFull = scheduler.newCondition( m_lock );
             }
         }
 
