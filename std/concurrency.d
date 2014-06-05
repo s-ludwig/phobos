@@ -1021,12 +1021,22 @@ Tid locate( string name )
 //////////////////////////////////////////////////////////////////////////////
 
 
+/**
+ * When definining a Scheduler, an instance of this struct must be associated
+ * with each logical thread.  It contains all implementation-level information
+ * needed by the internal API.
+ */
 struct ThreadInfo
 {
     Tid       ident;
     bool[Tid] links;
     Tid       owner;
 
+    /**
+     * Gets a thread-local instance of ThreadInfo, which should be used as the
+     * default instance when info is requested for a thread not created by the
+     * Scheduler.
+     */
     static @property ref thisInfo()
     {
         static ThreadInfo val;
@@ -1035,27 +1045,98 @@ struct ThreadInfo
 }
 
 
+/**
+ * Implementing a Scheduler allows the concurrency mechanism used by this
+ * module to be customized according to different needs.  By default, a call
+ * to spawn will create a new kernel thread that executes the supplied routine
+ * and terminates when finished.  But it is possible to create Schedulers that
+ * reuse threads, that multiplex Fibers (coroutines) across a single thread,
+ * or any number of other approaches.  By making the choice of Scheduler a
+ * user-level option, std.concurrency may be used for far more types of
+ * application than if this behavior were predefined.
+ */
 interface Scheduler
 {
+    /**
+     * This is intended to be called at the start of the program to yield all
+     * scheduling to the active Scheduler instance.  This is necessary for
+     * schedulers that rely on an external API for event management, but may
+     * not be required in all other circumstances.  So this is supplied as
+     * an optional but recommended entry point for applications that use a
+     * custom scheduler.
+     *
+     * Params:
+     *  op = A wrapper for whatever the main thread would have done in the
+     *       absence of a custom scheduler.  It will be automatically executed
+     *       via a call to spawn by the Scheduler.
+     */
     void start( void delegate() op );
+
+    /**
+     * This routine is called by spawn.  It is expected to instantiate a new
+     * logical thread and run the supplied operation.
+     *
+     * Params:
+     *  op = The function to execute.  This may be the actual function passed
+     *       by the user to spawn itself, or may be a wrapper function.
+     */
     void spawn( void delegate() op );
+
+    /**
+     * This routine is called at various points within concurrency-aware APIs
+     * to provide a scheduler a chance to yield execution when using some sort
+     * of cooperative multithreading model.  If this is not appropriate, such
+     * as when each logical thread is backed by a dedicated kernel thread,
+     * this routine may be a no-op.
+     */
     void yield();
 
+    /**
+     * Returns an instance of ThreadInfo specific to the logical thread that
+     * is calling this routine or, if the calling thread was not create by
+     * this scheduler, returns ThreadInfo.thisInfo instead.
+     */
     @property ref ThreadInfo thisInfo();
 
+    /**
+     * Creates a new Condition variable analog which is used to check for and
+     * to signal the addition of messages to a thread's message queue.  Like
+     * yield, some schedulers may need to define custom behavior so that calls
+     * to Condition.wait() yield to another thread when no new messages are
+     * available instead of blocking.
+     *
+     * Params:
+     *  m = The Mutex that will be associated with this condition.  It will be
+     *      locked prior to any operation on the condition, and so in some
+     *      cases a Scheduler may need to hold this reference and unlock the
+     *      mutex before yielding execution to another logical thread.
+     */
     Condition newCondition( Mutex m );
 }
 
 
+/**
+ * This is an example Scheduler that mirrors the default scheduling behavior
+ * of creating one kernel thread per call to spawn.  It is fully functional
+ * and may be instantiated and used, but is not a necessary part of the
+ * default functioning of this module.
+ */
 class ThreadScheduler :
     Scheduler
 {
+    /**
+     * This simply runs op directly, since no real scheduling is needed by
+     * this approach.
+     */
     void start( void delegate() op )
     {
         op();
     }
 
 
+    /**
+     * Creates a new kernel thread and assigns it to run the supplied op.
+     */
     void spawn( void delegate() op )
     {
         auto t = new Thread( op );
@@ -1063,17 +1144,28 @@ class ThreadScheduler :
     }
 
 
+    /**
+     * This scheduler does no explicit multiplexing, so this is a no-op.
+     */
     void yield()
     {
         // no explicit yield needed
     }
 
 
+    /**
+     * Returns ThreadInfo.thisInfo, since it is a thread-local instance of
+     * ThreadInfo, which is the correct behavior for this scheduler.
+     */
     @property ref ThreadInfo thisInfo()
     {
         return ThreadInfo.thisInfo;
     }
 
+
+    /**
+     * Creates a new Condition variable.  No custom behavior is needed here.
+     */
     Condition newCondition( Mutex m )
     {
         return new Condition( m );
@@ -1081,9 +1173,17 @@ class ThreadScheduler :
 }
 
 
+/**
+ * This is an example scheduler that creates a new Fiber per call to spawn
+ * and multiplexes the execution of all fibers within the main thread.
+ */
 class FiberScheduler :
     Scheduler
 {
+    /**
+     * This creates a new Fiber for the supplied op and then starts the
+     * dispatcher.
+     */
     void start( void delegate() op )
     {
         m_fibers ~= new InfoFiber( op );
@@ -1091,6 +1191,10 @@ class FiberScheduler :
     }
 
 
+    /**
+     * This created a new Fiber for the supplied op and adds it to the
+     * dispatch list.
+     */
     void spawn( void delegate() op )
     {
         void wrap()
@@ -1116,6 +1220,12 @@ class FiberScheduler :
     }
 
 
+    /**
+     * If the caller is a Fiber, this yields execution to another Fiber.
+     * Otherwise, it starts the dispatcher.  It's possible this latter
+     * behavior should be altered so that it simply performs a single
+     * pass through the dispatch list and returns.
+     */
     void yield()
     {
         if( Fiber.getThis() )
@@ -1124,6 +1234,11 @@ class FiberScheduler :
     }
 
 
+    /**
+     * Returns a ThreadInfo instance specific to the calling Fiber if
+     * the Fiber was created by this dispatcher, otherwise it returns
+     * ThreadInfo.thisInfo.
+     */
     @property ref ThreadInfo thisInfo()
     {
         auto f = cast(InfoFiber) Fiber.getThis();
@@ -1134,6 +1249,9 @@ class FiberScheduler :
     }
 
 
+    /**
+     * Returns a Condition analog that yields when wait or notify is called.
+     */
     Condition newCondition( Mutex m )
     {
         return new FiberCondition( m );
@@ -1231,6 +1349,11 @@ private:
 }
 
 
+/**
+ * This variable sets the Scheduler behavior within this program.  Typically,
+ * when setting a Scheduler, scheduler.start() should be called in main.  This
+ * routine will not return until program execution is complete.
+ */
 __gshared Scheduler scheduler;
 
 
