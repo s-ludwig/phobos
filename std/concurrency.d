@@ -331,8 +331,7 @@ private:
 }
 
 /**
- * Return the Tid of the thread which
- * spawned the caller's thread.
+ * Return the Tid of the thread which spawned the caller's thread.
  *
  * Throws: A $(D TidMissingException) exception if
  * there is no owner thread.
@@ -387,6 +386,8 @@ private template isSpawnable(F, T...)
 }
 
 /**
+ * Starts fn(args) in an asynchronous context.
+ *
  * Executes the supplied function in a new context represented by $(D Tid).  The
  * calling context is designated as the owner of the new context.  When the
  * owner context terminated an $(D OwnerTerminated) message will be sent to the
@@ -442,6 +443,9 @@ Tid spawn(F, T...)( F fn, T args )
 
 
 /**
+ * Starts fn(args) in an asynchronous context and will receive a LinkTerminated
+ * message when the operation terminates.
+ *
  * Executes the supplied function in a new context represented by Tid.  This
  * new context is linked to the calling context so that if either it or the
  * calling context terminates a LinkTerminated message will be sent to the
@@ -548,6 +552,8 @@ unittest
 
 
 /**
+ * Places the values as a message at the back of tid's message queue.
+ *
  * Sends the supplied value to the context represented by tid.  As with
  * $(XREF concurrency, spawn), $(D T) must not have unshared aliasing.
  */
@@ -560,6 +566,8 @@ void send(T...)( Tid tid, T vals )
 
 
 /**
+ * Places the values as a message on the front of tid's message queue.
+ *
  * Send a message to $(D tid) but place it at the front of $(D tid)'s message
  * queue instead of at the back.  This function is typically used for
  * out-of-band communication, to signal exceptional conditions, etc.
@@ -593,6 +601,8 @@ private void _send(T...)( MsgType type, Tid tid, T vals )
 
 
 /**
+ * Receives a message from another thread.
+ *
  * Receive a message from another thread, or block if no messages of the
  * specified types are available.  This function works by pattern matching
  * a message against a set of delegates and executing the first match found.
@@ -772,12 +782,14 @@ unittest
     assert(result == "Unexpected message type: expected 'string', got 'int'");
 }
 
-/++
-    Same as $(D receive) except that rather than wait forever for a message,
-    it waits until either it receives a message or the given
-    $(CXREF time, Duration) has passed. It returns $(D true) if it received a
-    message and $(D false) if it timed out waiting for one.
-  +/
+/**
+ * Tries to receive but will give up if no matches arrive within duration.
+ *
+ * Same as $(D receive) except that rather than wait forever for a message,
+ * it waits until either it receives a message or the given
+ * $(CXREF time, Duration) has passed. It returns $(D true) if it received a
+ * message and $(D false) if it timed out waiting for one.
+ */
 bool receiveTimeout(T...)( Duration duration, T ops )
 in
 {
@@ -855,6 +867,8 @@ private
 
 
 /**
+ * Sets a maximum mailbox size.
+ *
  * Sets a limit on the maximum number of user messages allowed in the mailbox.
  * If this limit is reached, the caller attempting to add a new message will
  * execute the behavior specified by doThis.  If messages is zero, the mailbox
@@ -881,6 +895,8 @@ void setMaxMailboxSize( Tid tid, size_t messages, OnCrowding doThis )
 
 
 /**
+ * Sets a maximum mailbox size.
+ *
  * Sets a limit on the maximum number of user messages allowed in the mailbox.
  * If this limit is reached, the caller attempting to add a new message will
  * execute onCrowdingDoThis.  If messages is zero, the mailbox is unbounded.
@@ -933,6 +949,8 @@ private void unregisterMe()
 
 
 /**
+ * Associates name with tid.
+ *
  * Associates name with tid in a process-local map.  When the thread
  * represented by tid terminates, any names associated with it will be
  * automatically unregistered.
@@ -1012,6 +1030,8 @@ Tid locate( string name )
 
 
 /**
+ * Encapsulates all implementation-level data needed for scheduling.
+ *
  * When definining a Scheduler, an instance of this struct must be associated
  * with each logical thread.  It contains all implementation-level information
  * needed by the internal API.
@@ -1023,6 +1043,8 @@ struct ThreadInfo
     Tid       owner;
 
     /**
+     * Gets a thread-local instance of ThreadInfo.
+     *
      * Gets a thread-local instance of ThreadInfo, which should be used as the
      * default instance when info is requested for a thread not created by the
      * Scheduler.
@@ -1035,6 +1057,8 @@ struct ThreadInfo
 
 
     /**
+     * Cleans up this ThreadInfo.
+     *
      * This must be called when a scheduled thread terminates.  It tears down
      * the messaging system for the thread and notifies interested parties of
      * the thread's termination.
@@ -1053,6 +1077,8 @@ struct ThreadInfo
 
 
 /**
+ * A Scheduler controls how threading is performed by spawn.
+ *
  * Implementing a Scheduler allows the concurrency mechanism used by this
  * module to be customized according to different needs.  By default, a call
  * to spawn will create a new kernel thread that executes the supplied routine
@@ -1085,6 +1111,8 @@ struct ThreadInfo
 interface Scheduler
 {
     /**
+     * Spawns the supplied op and starts the Scheduler.
+     *
      * This is intended to be called at the start of the program to yield all
      * scheduling to the active Scheduler instance.  This is necessary for
      * schedulers that explicitly dispatch threads rather than simply relying
@@ -1099,6 +1127,8 @@ interface Scheduler
     void start( void delegate() op );
 
     /**
+     * Assigns a logical thread to execute the supplied op.
+     *
      * This routine is called by spawn.  It is expected to instantiate a new
      * logical thread and run the supplied operation.  This thread must call
      * thisInfo.cleanup() when the thread terminates if the scheduled thread
@@ -1112,6 +1142,8 @@ interface Scheduler
     void spawn( void delegate() op );
 
     /**
+     * Yields execution to another logical thread.
+     *
      * This routine is called at various points within concurrency-aware APIs
      * to provide a scheduler a chance to yield execution when using some sort
      * of cooperative multithreading model.  If this is not appropriate, such
@@ -1121,6 +1153,8 @@ interface Scheduler
     void yield();
 
     /**
+     * Returns an appropriate ThreadInfo instance.
+     *
      * Returns an instance of ThreadInfo specific to the logical thread that
      * is calling this routine or, if the calling thread was not create by
      * this scheduler, returns ThreadInfo.thisInfo instead.
@@ -1128,6 +1162,8 @@ interface Scheduler
     @property ref ThreadInfo thisInfo();
 
     /**
+     * Creates a Condition varialbe analog for signaling.
+     *
      * Creates a new Condition variable analog which is used to check for and
      * to signal the addition of messages to a thread's message queue.  Like
      * yield, some schedulers may need to define custom behavior so that calls
@@ -1145,6 +1181,8 @@ interface Scheduler
 
 
 /**
+ * An example Scheduler using kernel threads.
+ *
  * This is an example Scheduler that mirrors the default scheduling behavior
  * of creating one kernel thread per call to spawn.  It is fully functional
  * and may be instantiated and used, but is not a necessary part of the
@@ -1203,6 +1241,8 @@ class ThreadScheduler :
 
 
 /**
+ * An example Scheduler using Fibers.
+ *
  * This is an example scheduler that creates a new Fiber per call to spawn
  * and multiplexes the execution of all fibers within the main thread.
  */
@@ -1246,6 +1286,8 @@ class FiberScheduler :
 
 
     /**
+     * Returns an appropriate ThreadInfo instance.
+     *
      * Returns a ThreadInfo instance specific to the calling Fiber if the
      * Fiber was created by this dispatcher, otherwise it returns
      * ThreadInfo.thisInfo.
@@ -1377,6 +1419,8 @@ private:
 
 
 /**
+ * Sets the Scheduler behavior within the program.
+ *
  * This variable sets the Scheduler behavior within this program.  Typically,
  * when setting a Scheduler, scheduler.start() should be called in main.  This
  * routine will not return until program execution is complete.
