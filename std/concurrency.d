@@ -1591,13 +1591,23 @@ unittest
     {
         auto tid = spawn(
         {
-            int i = 1;
-            for (; true; i++)
+            int i;
+
+            try
             {
-                assertNotThrown!AssertError(
-                    assert(receiveOnly!int() == i));
+                for (i = 1; i < 10; i++)
+                {
+                    assertNotThrown!AssertError(
+                        assert(receiveOnly!int() == i));
+                }
             }
-            assert(i == 3);
+            catch (OwnerTerminated e)
+            {
+
+            }
+
+            // i will advance 1 past the last value expected
+            assert(i == 4);
         });
 
         auto r = new Generator!int(
