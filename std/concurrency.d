@@ -196,17 +196,7 @@ private
 
 static ~this()
 {
-    alias info  = thisInfo;
-    auto  ident = info.ident;
-    auto  links = info.links;
-    auto  owner = info.owner;
-
-    if( ident.mbox !is null )
-        ident.mbox.close();
-    foreach( tid; links.keys )
-        _send( MsgType.linkDead, tid, ident );
-    if( owner != Tid.init )
-        _send( MsgType.linkDead, owner, ident );
+    thisInfo.cleanup();
 }
 
 
@@ -926,7 +916,7 @@ shared static this()
 }
 
 
-static ~this()
+private void unregisterMe()
 {
     auto me = thisTid;
 
@@ -1042,6 +1032,23 @@ struct ThreadInfo
         static ThreadInfo val;
         return val;
     }
+
+
+    /**
+     * This must be called when a scheduled thread terminates.  It tears down
+     * the messaging system for the thread and notifies interested parties of
+     * the thread's termination.
+     */
+    void cleanup()
+    {
+        if( ident.mbox !is null )
+            ident.mbox.close();
+        foreach( tid; links.keys )
+            _send( MsgType.linkDead, tid, ident );
+        if( owner != Tid.init )
+            _send( MsgType.linkDead, owner, ident );
+        unregisterMe(); // clean up registry entries
+    }
 }
 
 
@@ -1054,16 +1061,35 @@ struct ThreadInfo
  * or any number of other approaches.  By making the choice of Scheduler a
  * user-level option, std.concurrency may be used for far more types of
  * application than if this behavior were predefined.
+ *
+ * Example:
+ * ---
+ * import std.concurrency;
+ * import std.stdio;
+ *
+ * void main()
+ * {
+ *     scheduler = new FiberScheduler;
+ *     scheduler.start(
+ *     {
+ *         writeln("the rest of main goes here");
+ *     });
+ * }
+ * ---
+ *
+ * Some schedulers have a dispatching loop that must run if they are to work
+ * properly, so for the sake of consistency, when using a scheduler, start()
+ * must be called within main().  This yields control to the scheduler and
+ * will ensure that any spawned threads are executed in an expected manner.
  */
 interface Scheduler
 {
     /**
      * This is intended to be called at the start of the program to yield all
      * scheduling to the active Scheduler instance.  This is necessary for
-     * schedulers that rely on an external API for event management, but may
-     * not be required in all other circumstances.  So this is supplied as
-     * an optional but recommended entry point for applications that use a
-     * custom scheduler.
+     * schedulers that explicitly dispatch threads rather than simply relying
+     * on the operating system to do so, and so start should always be called
+     * within main() to begin normal program execution.
      *
      * Params:
      *  op = A wrapper for whatever the main thread would have done in the
@@ -1074,7 +1100,10 @@ interface Scheduler
 
     /**
      * This routine is called by spawn.  It is expected to instantiate a new
-     * logical thread and run the supplied operation.
+     * logical thread and run the supplied operation.  This thread must call
+     * thisInfo.cleanup() when the thread terminates if the scheduled thread
+     * is not a kernel thread--all kernel threads will have their ThreadInfo
+     * cleaned up automatically by a thread-local destructor.
      *
      * Params:
      *  op = The function to execute.  This may be the actual function passed
@@ -1186,7 +1215,7 @@ class FiberScheduler :
      */
     void start( void delegate() op )
     {
-        m_fibers ~= new InfoFiber( op );
+        create( op );
         dispatch();
     }
 
@@ -1197,46 +1226,28 @@ class FiberScheduler :
      */
     void spawn( void delegate() op )
     {
-        void wrap()
-        {
-            scope(exit)
-            {
-                auto me = thisTid;
-
-                synchronized( registryLock )
-                {
-                    if( auto allNames = me in namesByTid )
-                    {
-                        foreach( name; *allNames )
-                            tidByName.remove( name );
-                        namesByTid.remove( me );
-                    }
-                }
-            }
-            op();
-        }
-        m_fibers ~= new InfoFiber( &wrap );
+        create( op );
         yield();
     }
 
 
     /**
-     * If the caller is a Fiber, this yields execution to another Fiber.
-     * Otherwise, it starts the dispatcher.  It's possible this latter
-     * behavior should be altered so that it simply performs a single
-     * pass through the dispatch list and returns.
+     * If the caller is a scheduled Fiber, this yields execution to another
+     * scheduled Fiber.
      */
     void yield()
     {
-        if( Fiber.getThis() )
-            return Fiber.yield();
-        return dispatch();
+        // NOTE: It's possible that we should test whether the calling Fiber
+        //       is an InfoFiber before yielding, but I think it's reasonable
+        //       that any (non-Generator) fiber should yield here.
+        if(Fiber.getThis())
+            Fiber.yield();
     }
 
 
     /**
-     * Returns a ThreadInfo instance specific to the calling Fiber if
-     * the Fiber was created by this dispatcher, otherwise it returns
+     * Returns a ThreadInfo instance specific to the calling Fiber if the
+     * Fiber was created by this dispatcher, otherwise it returns
      * ThreadInfo.thisInfo.
      */
     @property ref ThreadInfo thisInfo()
@@ -1329,7 +1340,9 @@ private:
 
         while( m_fibers.length > 0 )
         {
-            m_fibers[m_pos].call();
+            auto t = m_fibers[m_pos].call( false );
+            if (t !is null && !(cast(OwnerTerminated) t))
+                throw t;
             if( m_fibers[m_pos].state() == Fiber.State.TERM )
             {
                 if( m_pos >= (m_fibers = remove( m_fibers, m_pos )).length )
@@ -1340,6 +1353,20 @@ private:
                 m_pos = 0;
             }
         }
+    }
+
+
+    final void create( void delegate() op )
+    {
+        void wrap()
+        {
+            scope(exit)
+            {
+                thisInfo.cleanup();
+            }
+            op();
+        }
+        m_fibers ~= new InfoFiber( &wrap );
     }
 
 
