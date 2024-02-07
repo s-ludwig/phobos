@@ -1845,6 +1845,8 @@ size_t validLength(E)(const(E)[] s)
  */
 immutable(E)[] sanitize(E)(immutable(E)[] s)
 {
+    import std.array : appender;
+
     size_t n = validLength(s);
     if (n == s.length) return s;
 
@@ -1863,27 +1865,25 @@ immutable(E)[] sanitize(E)(immutable(E)[] s)
     }
 
     // Now do the write
-    E[] array = new E[len];
-    array[0 .. n] = s[0 .. n];
-    size_t offset = n;
+    auto ret = appender!string();
+    ret.reserve(len);
+    ret.put(s[0 .. n]);
 
     t = s[n..$];
     while (t.length != 0)
     {
         immutable c = EncoderInstance!(E).safeDecode(t);
         assert(c == INVALID_SEQUENCE);
-        array[offset .. offset+repSeq.length] = repSeq[];
-        offset += repSeq.length;
+        ret.put(repSeq[]);
         n = validLength(t);
-        array[offset .. offset+n] = t[0 .. n];
-        offset += n;
+        ret.put(t[0 .. n]);
         t = t[n..$];
     }
-    return cast(immutable(E)[])array[0 .. offset];
+    return ret.data;
 }
 
 ///
-@system pure unittest
+@safe pure unittest
 {
     assert(sanitize("hello \xF0\x80world") == "hello \xEF\xBF\xBDworld");
 }
